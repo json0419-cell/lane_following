@@ -1,0 +1,40 @@
+{
+  "export_format": "onnx",
+  "checkpoint": "/home/bcsi220/PycharmProjects/duckietownRL/runs_db21j_multi_engine_rllib_photo_1.5/checkpoints/rllib_db21j_multi_engine_712704/policies/default_policy",
+  "policy_class": "PPOTorchPolicy",
+  "observation_space": [
+    84,
+    84,
+    9
+  ],
+  "action_space": [
+    1
+  ],
+  "input_name": "obs",
+  "output_name": "heading",
+  "input_dtype": "float32",
+  "input_range": [
+    0.0,
+    1.0
+  ],
+  "input_layout": "NHWC",
+  "frame_stack": 3,
+  "rgb_channels": 3,
+  "crop_top_ratio": 0.33,
+  "resize_hw": [
+    84,
+    84
+  ],
+  "heading_type": "heading_smooth",
+  "forward_speed": 0.5,
+  "max_steer": 1.0,
+  "heading_to_wheels": {
+    "heading": "left=clip(1+heading,0,1), right=clip(1-heading,0,1)",
+    "heading_smooth": "heading=(model_output**3)*max_steer; left=clip(1+heading,0,1); right=clip(1-heading,0,1)"
+  },
+  "notes": [
+    "Model output is the deterministic Gaussian mean used by policy.compute_single_action(explore=False).",
+    "Deployment must preserve crop, resize, normalization, and channel-stacked frame order."
+  ],
+  "opset_version": 11
+}
