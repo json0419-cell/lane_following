@@ -12,7 +12,6 @@ catkin_package()
 
 catkin_install_python(PROGRAMS
   src/camera_reader_node.py
-  src/object_detection_node.py
   src/heading_control_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

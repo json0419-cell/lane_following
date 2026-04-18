@@ -95,14 +95,8 @@ RUN dt-pip3-install "${PROJECT_PATH}/dependencies-py3.*"
 COPY ./packages "${PROJECT_PATH}/packages"
 #COPY ./packages/ ${CATKIN_WS_DIR}/src/
 
-# install scripts
-COPY ./assets/entrypoint.d "${PROJECT_PATH}/assets/entrypoint.d"
-COPY ./assets/environment.d "${PROJECT_PATH}/assets/environment.d"
-copy ./assets/myyolo11n.pt "${PROJECT_PATH}/assets/myyolo11n.pt"
-COPY ./assets/rllib_db21j_multi_engine_151552_heading.onnx "${PROJECT_PATH}/assets/rllib_db21j_multi_engine_151552_heading.onnx"
-COPY ./assets/rllib_db21j_multi_engine_151552_heading.onnx.json "${PROJECT_PATH}/assets/rllib_db21j_multi_engine_151552_heading.onnx.json"
-COPY assets/best/rllib_db21j_multi_engine_712704_heading.onnx "${PROJECT_PATH}/assets/rllib_db21j_multi_engine_712704_heading.onnx"
-COPY assets/best/rllib_db21j_multi_engine_712704_heading.onnx.json "${PROJECT_PATH}/assets/rllib_db21j_multi_engine_712704_heading.onnx.json"
+# install scripts and assets in a single layer to avoid overlay2 lowerdir depth issues
+COPY ./assets "${PROJECT_PATH}/assets"
 
 # build packages
 RUN . /opt/ros/${ROS_DISTRO}/setup.sh && \

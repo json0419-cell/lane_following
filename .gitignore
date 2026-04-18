@@ -1,9 +1,34 @@
-docs/build
-*pyc
+# Python caches
+__pycache__/
+*.py[cod]
 
-# documentation artifacts
+# Documentation artifacts
+docs/build/
 html/*
 !html/HTML_DOCS_WILL_BE_GENERATED_HERE
 
-# otherwise CI thinks index not clean
+# Editor / IDE files
+.idea/
+.vscode/
+
+# Local macOS / shell noise
+.DS_Store
+*.swp
+*.swo
+
+# Temporary outputs
+*.log
+*.tmp
+
+# Model artifacts in the top-level assets directory
+assets/*.onnx
+assets/*.onnx.json
+assets/*.pt
+
+# Local asset backups and experiment folders
+assets/best/*
+!assets/best/*.onnx
+!assets/best/*.onnx.json
+
+# Otherwise CI thinks index is not clean
 *.resolved

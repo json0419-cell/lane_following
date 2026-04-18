@@ -1,18 +1,18 @@
 # ONNX Heading Control
 
-This repository is now set up to deploy the exported lane-following ONNX model
-`rllib_db21j_multi_engine_602112_heading.onnx` on a Duckiebot.
+This repository deploys an ONNX lane-following heading model on a Duckiebot.
 
 The runtime pipeline is:
 
-`camera -> crop/resize -> 3-frame stack -> ONNX heading -> heading_smooth -> wheel commands`
+`camera -> crop/resize -> binary lane image -> 3-frame stack -> ONNX heading -> wheel commands`
 
 ## Assets
 
-The deployment assets are stored in `/assets`:
+The deployment assets are stored in `/assets`.
 
-- `rllib_db21j_multi_engine_602112_heading.onnx`
-- `rllib_db21j_multi_engine_602112_heading.onnx.json`
+The default model is selected in:
+
+- `packages/my_package/src/constants.py`
 
 The node reads the metadata JSON so the preprocess settings stay aligned with training.
 
@@ -59,6 +59,7 @@ dts devel run -H <ROBOT_NAME> -L heading-control
 - `~forward_speed`
 - `~max_steer`
 - `~heading_type`
+- `~observation_mode`
 - `~publish_debug_image`
 - `~process_every_n_frames`
 - `~command_timeout`
@@ -68,8 +69,10 @@ dts devel run -H <ROBOT_NAME> -L heading-control
 ## Notes
 
 - The ONNX model expects `84x84x9` NHWC input with pixel values normalized to `[0, 1]`.
-- The current export is deterministic and outputs the heading mean used by `explore=False`.
+- The current deployment path uses the lane-mask preprocessing implemented in:
+  - `packages/my_package/src/lane_mask.py`
 - The wheel mapping matches the training wrapper:
+  - `heading`: `heading = action * max_steer`
   - `heading_smooth`: `heading = action^3 * max_steer`
   - `left = clip(1 + heading, 0, 1)`
   - `right = clip(1 - heading, 0, 1)`

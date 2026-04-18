@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
+import csv
 import os
 import sys
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -18,8 +20,20 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from constants import HEADING_GAIN, HEADING_MODEL_METADATA_PATH, HEADING_MODEL_PATH, HEADING_PROCESS_EVERY_N_FRAMES
+from constants import (
+    HEADING_GAIN,
+    HEADING_MODEL_METADATA_PATH,
+    HEADING_OBSERVATION_MODE,
+    HEADING_MODEL_PATH,
+    HEADING_PROCESS_EVERY_N_FRAMES,
+    HEADING_TYPE,
+)
 from heading_model import HeadingOnnxModel
+from lane_mask import build_binary_lane_image_from_bgr
+
+HEADING_CLIPPED_08 = "heading_clipped_08"
+HEADING_CLIPPED_08_LIMIT = 0.8
+HEADING_CLIPPED_08_DECIMALS = 2
 
 
 def compressed_imgmsg_to_cv2(msg: CompressedImage) -> Optional[np.ndarray]:
@@ -67,13 +81,17 @@ class HeadingControlNode(DTROS):
         self.forward_speed = float(rospy.get_param("~forward_speed", self.model.forward_speed))
         self.heading_gain = float(rospy.get_param("~heading_gain", HEADING_GAIN))
         self.max_steer = float(rospy.get_param("~max_steer", self.model.max_steer))
-        self.heading_type = str(rospy.get_param("~heading_type", self.model.heading_type))
+        self.heading_type = str(rospy.get_param("~heading_type", HEADING_TYPE))
+        self.observation_mode = str(rospy.get_param("~observation_mode", HEADING_OBSERVATION_MODE))
         self.publish_debug = bool(rospy.get_param("~publish_debug_image", True))
         self.command_timeout = float(rospy.get_param("~command_timeout", 0.5))
         self.process_every_n_frames = max(
             1,
             int(rospy.get_param("~process_every_n_frames", HEADING_PROCESS_EVERY_N_FRAMES)),
         )
+        self.record_debug = bool(rospy.get_param("~record_debug", False))
+        self.record_debug_dir = str(rospy.get_param("~record_debug_dir", "/data/heading_debug"))
+        self.record_max_frames = max(0, int(rospy.get_param("~record_max_frames", 0)))
 
         self.camera_topic = rospy.get_param(
             "~camera_topic",
@@ -87,6 +105,14 @@ class HeadingControlNode(DTROS):
         self.frames = deque(maxlen=self.model.frame_stack)
         self.frame_counter = 0
         self.last_command_time = rospy.Time(0)
+        self.record_saved_frames = 0
+        self.record_root: Optional[Path] = None
+        self.record_file = None
+        self.record_writer = None
+        self.record_raw_dir: Optional[Path] = None
+        self.record_cropped_dir: Optional[Path] = None
+        self.record_preprocessed_dir: Optional[Path] = None
+        self.record_overlay_dir: Optional[Path] = None
 
         self.pub_wheels = rospy.Publisher(self.wheels_topic, WheelsCmdStamped, queue_size=1)
         self.pub_heading = rospy.Publisher("~heading", Float32, queue_size=1)
@@ -102,6 +128,10 @@ class HeadingControlNode(DTROS):
         )
         self.watchdog = rospy.Timer(rospy.Duration(0.1), self._watchdog_cb)
         rospy.on_shutdown(self.stop_vehicle)
+        rospy.on_shutdown(self._close_recorder)
+
+        if self.record_debug:
+            self._init_recorder()
 
         self.log(
             f"Loaded ONNX model from {self.model.config['model_path']} "
@@ -114,25 +144,83 @@ class HeadingControlNode(DTROS):
         self.log(
             "Control config: "
             f"heading_type={self.heading_type} "
+            f"observation_mode={self.observation_mode} "
             f"forward_speed={self.forward_speed:.3f} "
             f"heading_gain={self.heading_gain:.3f} "
             f"max_steer={self.max_steer:.3f} "
-            f"process_every_n_frames={self.process_every_n_frames}"
+            f"process_every_n_frames={self.process_every_n_frames} "
+            f"record_debug={self.record_debug} "
+            f"record_max_frames={self.record_max_frames}"
         )
         self.log(f"Subscribing to {self.camera_topic}")
         self.log(f"Publishing wheel commands to {self.wheels_topic}")
+        if self.record_root is not None:
+            self.log(f"Recording debug frames to {self.record_root}")
 
-    def _preprocess(self, bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        top = int(rgb.shape[0] * self.model.crop_top_ratio)
-        cropped = rgb[top:, :, :]
-        resized = cv2.resize(
-            cropped,
+    def _init_recorder(self) -> None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.record_root = Path(self.record_debug_dir) / timestamp
+        self.record_raw_dir = self.record_root / "raw"
+        self.record_cropped_dir = self.record_root / "cropped"
+        self.record_preprocessed_dir = self.record_root / "preprocessed"
+        self.record_overlay_dir = self.record_root / "overlay"
+        for path in (
+            self.record_raw_dir,
+            self.record_cropped_dir,
+            self.record_preprocessed_dir,
+            self.record_overlay_dir,
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+
+        csv_path = self.record_root / "sequence.csv"
+        self.record_file = csv_path.open("w", newline="", encoding="utf-8")
+        self.record_writer = csv.DictWriter(
+            self.record_file,
+            fieldnames=[
+                "frame_idx",
+                "stamp",
+                "raw_heading",
+                "final_heading",
+                "left",
+                "right",
+                "raw_path",
+                "cropped_path",
+                "preprocessed_path",
+                "overlay_path",
+            ],
+        )
+        self.record_writer.writeheader()
+        self.record_file.flush()
+
+    def _close_recorder(self) -> None:
+        if self.record_file is not None:
+            try:
+                self.record_file.close()
+            except Exception:
+                pass
+            self.record_file = None
+
+    def _preprocess(self, bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        top = int(bgr.shape[0] * self.model.crop_top_ratio)
+        cropped_bgr = bgr[top:, :, :]
+        resized_bgr = cv2.resize(
+            cropped_bgr,
             (self.model.resize_width, self.model.resize_height),
             interpolation=cv2.INTER_AREA,
         )
-        normalized = resized.astype(np.float32) / 255.0
-        return resized, normalized
+        if self.observation_mode == "binary_lane":
+            preprocessed = build_binary_lane_image_from_bgr(resized_bgr)
+            if self.record_debug:
+                cropped = cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2RGB)
+            else:
+                cropped = resized_bgr
+        elif self.observation_mode == "rgb":
+            cropped = cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2RGB)
+            preprocessed = cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB)
+        else:
+            raise ValueError(f"Unsupported observation_mode={self.observation_mode}")
+        normalized = preprocessed.astype(np.float32) / 255.0
+        return cropped, preprocessed, normalized
 
     def _stack_observation(self, frame: np.ndarray) -> np.ndarray:
         if not self.frames:
@@ -146,6 +234,11 @@ class HeadingControlNode(DTROS):
         heading = float(np.clip(heading_action, -1.0, 1.0))
         if self.heading_type == "heading_smooth":
             heading = (heading ** 3) * self.max_steer
+        elif self.heading_type == HEADING_CLIPPED_08:
+            heading = float(np.clip(heading, -HEADING_CLIPPED_08_LIMIT, HEADING_CLIPPED_08_LIMIT))
+            heading = float(np.round(heading, HEADING_CLIPPED_08_DECIMALS))
+            heading = float(np.clip(heading * self.max_steer, -HEADING_CLIPPED_08_LIMIT, HEADING_CLIPPED_08_LIMIT))
+            heading = float(np.round(heading, HEADING_CLIPPED_08_DECIMALS))
         else:
             heading = heading * self.max_steer
 
@@ -165,6 +258,83 @@ class HeadingControlNode(DTROS):
         self.pub_wheels.publish(msg)
         self.last_command_time = msg.header.stamp
 
+    def _make_overlay_image(
+        self,
+        preprocessed_rgb: np.ndarray,
+        raw_heading: float,
+        final_heading: float,
+        left: float,
+        right: float,
+    ) -> np.ndarray:
+        overlay_bgr = cv2.cvtColor(preprocessed_rgb, cv2.COLOR_RGB2BGR)
+        lines = [
+            f"raw_heading={raw_heading:+.3f}",
+            f"final_heading={final_heading:+.3f}",
+            f"left={left:.3f} right={right:.3f}",
+        ]
+        for idx, text in enumerate(lines):
+            cv2.putText(
+                overlay_bgr,
+                text,
+                (4, 18 + idx * 18),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 255, 0),
+                1,
+                cv2.LINE_AA,
+            )
+        return overlay_bgr
+
+    def _record_step(
+        self,
+        *,
+        image_msg: CompressedImage,
+        raw_bgr: np.ndarray,
+        cropped_rgb: np.ndarray,
+        preprocessed_rgb: np.ndarray,
+        overlay_bgr: np.ndarray,
+        raw_heading: float,
+        final_heading: float,
+        left: float,
+        right: float,
+    ) -> None:
+        if not self.record_debug or self.record_writer is None:
+            return
+        if self.record_max_frames > 0 and self.record_saved_frames >= self.record_max_frames:
+            return
+
+        frame_idx = self.record_saved_frames + 1
+        filename = f"{frame_idx:06d}.jpg"
+        raw_path = self.record_raw_dir / filename
+        cropped_path = self.record_cropped_dir / filename
+        preprocessed_path = self.record_preprocessed_dir / filename
+        overlay_path = self.record_overlay_dir / filename
+
+        cv2.imwrite(str(raw_path), raw_bgr)
+        cv2.imwrite(str(cropped_path), cv2.cvtColor(cropped_rgb, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(str(preprocessed_path), cv2.cvtColor(preprocessed_rgb, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(str(overlay_path), overlay_bgr)
+
+        self.record_writer.writerow(
+            {
+                "frame_idx": frame_idx,
+                "stamp": image_msg.header.stamp.to_sec(),
+                "raw_heading": raw_heading,
+                "final_heading": final_heading,
+                "left": left,
+                "right": right,
+                "raw_path": f"raw/{raw_path.name}",
+                "cropped_path": f"cropped/{cropped_path.name}",
+                "preprocessed_path": f"preprocessed/{preprocessed_path.name}",
+                "overlay_path": f"overlay/{overlay_path.name}",
+            }
+        )
+        self.record_file.flush()
+        self.record_saved_frames = frame_idx
+
+        if self.record_max_frames > 0 and self.record_saved_frames == self.record_max_frames:
+            self.log(f"Reached record_max_frames={self.record_max_frames}; stopping debug capture.")
+
     def _watchdog_cb(self, _event) -> None:
         if self.command_timeout <= 0.0 or self.last_command_time == rospy.Time(0):
             return
@@ -183,7 +353,7 @@ class HeadingControlNode(DTROS):
             self._publish_wheels(0.0, 0.0)
             return
 
-        debug_rgb, normalized = self._preprocess(bgr)
+        cropped_rgb, preprocessed_rgb, normalized = self._preprocess(bgr)
         stacked = self._stack_observation(normalized)
 
         try:
@@ -206,26 +376,28 @@ class HeadingControlNode(DTROS):
             ),
         )
 
+        overlay_bgr = self._make_overlay_image(
+            preprocessed_rgb,
+            heading_action,
+            smooth_heading,
+            left,
+            right,
+        )
+        self._record_step(
+            image_msg=image_msg,
+            raw_bgr=bgr,
+            cropped_rgb=cropped_rgb,
+            preprocessed_rgb=preprocessed_rgb,
+            overlay_bgr=overlay_bgr,
+            raw_heading=heading_action,
+            final_heading=smooth_heading,
+            left=left,
+            right=right,
+        )
+
         if self.publish_debug and self.pub_debug_image.get_num_connections() > 0:
-            debug_bgr = cv2.cvtColor(debug_rgb, cv2.COLOR_RGB2BGR)
-            overlay = [
-                f"raw_heading={heading_action:+.3f}",
-                f"smooth_heading={smooth_heading:+.3f}",
-                f"left={left:.3f} right={right:.3f}",
-            ]
-            for idx, text in enumerate(overlay):
-                cv2.putText(
-                    debug_bgr,
-                    text,
-                    (4, 18 + idx * 18),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (0, 255, 0),
-                    1,
-                    cv2.LINE_AA,
-                )
             debug_msg = cv2_to_compressed_imgmsg(
-                debug_bgr,
+                overlay_bgr,
                 stamp=image_msg.header.stamp,
                 frame_id=image_msg.header.frame_id,
             )

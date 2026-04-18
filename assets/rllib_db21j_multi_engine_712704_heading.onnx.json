@@ -25,7 +25,7 @@
     84,
     84
   ],
-  "heading_type": "heading_smooth",
+  "heading_type": "heading",
   "forward_speed": 0.5,
   "max_steer": 1.0,
   "heading_to_wheels": {
